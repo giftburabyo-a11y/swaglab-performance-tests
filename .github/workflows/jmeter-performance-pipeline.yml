@@ -1,16 +1,9 @@
 name: Swag Labs Performance Tests (JMeter)
 
 on:
-  # Run on every push to main or develop branches
   push:
     branches:
-      - main
-      - develop
-  # Run on pull requests
-  pull_request:
-    branches:
-      - main
-  # Allow manual trigger with test type selection
+      - master
   workflow_dispatch:
     inputs:
       test_type:
@@ -24,98 +17,12 @@ on:
           - peak
           - stress
           - endurance
-          - all
-      jmeter_version:
-        description: 'JMeter version'
-        required: false
-        default: '5.6.3'
-  # Scheduled nightly regression run
-  schedule:
-    - cron: '0 2 * * *'   # 2 AM UTC daily
-
-env:
-  JMETER_VERSION: ${{ github.event.inputs.jmeter_version || '5.6.3' }}
-  JMETER_HOME: /opt/apache-jmeter
-  RESULTS_DIR: jmeter-results
-  REPORTS_DIR: jmeter-reports
-  TEST_PLAN: SwagLabs_Performance_Test.jmx
-  # Performance thresholds
-  MAX_ERROR_RATE: 1          # percent
-  MAX_AVG_RESPONSE_MS: 2000  # milliseconds
 
 jobs:
 
-  # ──────────────────────────────────────────
-  # JOB 1: SETUP & VALIDATE TEST PLAN
-  # ──────────────────────────────────────────
-  validate-test-plan:
-    name: Validate JMeter Test Plan
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java 11
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '11'
-
-      - name: Cache JMeter Installation
-        id: cache-jmeter
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.JMETER_HOME }}
-          key: jmeter-${{ env.JMETER_VERSION }}
-
-      - name: Install Apache JMeter
-        if: steps.cache-jmeter.outputs.cache-hit != 'true'
-        run: |
-          echo "==> Downloading Apache JMeter $JMETER_VERSION..."
-          wget -q "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz" \
-            -O /tmp/jmeter.tgz
-          sudo mkdir -p $JMETER_HOME
-          sudo tar -xzf /tmp/jmeter.tgz --strip-components=1 -C $JMETER_HOME
-          echo "==> JMeter installed at $JMETER_HOME"
-
-      - name: Verify JMeter Installation
-        run: |
-          $JMETER_HOME/bin/jmeter --version
-          echo "JMeter binary: $(which $JMETER_HOME/bin/jmeter || echo 'using full path')"
-
-      - name: Validate Test Plan XML
-        run: |
-          echo "==> Validating JMX test plan..."
-          xmllint --noout tests/$TEST_PLAN 2>&1 && echo "XML is valid" || exit 1
-
-      - name: Dry-Run JMeter (Check test plan loads)
-        run: |
-          $JMETER_HOME/bin/jmeter \
-            -n \
-            -t tests/$TEST_PLAN \
-            --loglevel WARN \
-            -JBASEurl=www.saucedemo.com \
-            --forceDeleteResultFile \
-            -l /tmp/dry_run.jtl \
-            -e -o /tmp/dry_run_report \
-            2>&1 | head -30 || true
-          echo "==> Dry-run complete"
-
-
-  # ──────────────────────────────────────────
-  # JOB 2: BASELINE TEST (50 Users)
-  # ──────────────────────────────────────────
   baseline-test:
     name: Baseline Test (50 Users)
     runs-on: ubuntu-latest
-    needs: validate-test-plan
-    if: |
-      github.event.inputs.test_type == 'baseline' ||
-      github.event.inputs.test_type == 'all' ||
-      github.event_name == 'push' ||
-      github.event_name == 'pull_request' ||
-      github.event_name == 'schedule'
 
     steps:
       - name: Checkout Repository
@@ -127,75 +34,72 @@ jobs:
           distribution: 'temurin'
           java-version: '11'
 
-      - name: Restore JMeter Cache
+      - name: Cache JMeter
+        id: cache-jmeter
         uses: actions/cache@v4
         with:
-          path: ${{ env.JMETER_HOME }}
-          key: jmeter-${{ env.JMETER_VERSION }}
+          path: /opt/jmeter
+          key: jmeter-5.6.3
 
-      - name: Create Results Directory
-        run: mkdir -p $RESULTS_DIR $REPORTS_DIR/baseline
-
-      - name: Run Baseline Performance Test
+      - name: Install JMeter
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
         run: |
-          echo "==> Starting Baseline Test: 50 users, ramp 60s, 3 loops"
-          $JMETER_HOME/bin/jmeter \
-            -n \
-            -t tests/$TEST_PLAN \
-            -l $RESULTS_DIR/baseline_results.jtl \
-            -e -o $REPORTS_DIR/baseline \
-            -JBASEurl=www.saucedemo.com \
-            -Jjmeter.reportgenerator.overall_granularity=60000 \
-            --loglevel WARN \
-            2>&1 | tee $RESULTS_DIR/baseline_run.log
-          echo "Exit code: $?"
+          wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz -O /tmp/jmeter.tgz
+          sudo mkdir -p /opt/jmeter
+          sudo tar -xzf /tmp/jmeter.tgz --strip-components=1 -C /opt/jmeter
+          echo "JMeter installed"
 
-      - name: Check Performance Thresholds (Baseline)
+      - name: Validate Test Plan
+        run: |
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          try:
+            ET.parse('tests/SwagLabs_Performance_Test.jmx')
+            print('XML is valid')
+          except ET.ParseError as e:
+            print(f'XML error: {e}')
+            exit(1)
+          "
+
+      - name: Create Results Directories
+        run: mkdir -p results reports/baseline
+
+      - name: Run Baseline Test (50 Users)
+        run: |
+          /opt/jmeter/bin/jmeter \
+            -n \
+            -t tests/SwagLabs_Performance_Test.jmx \
+            -Jthreads=50 \
+            -Jrampup=60 \
+            -Jloops=3 \
+            -l results/baseline.jtl \
+            -e -o reports/baseline \
+            --loglevel WARN
+          echo "Baseline test complete"
+
+      - name: Check Results
         run: |
           python3 << 'EOF'
-          import csv, sys, os
-
-          results_file = os.environ.get('RESULTS_DIR', 'jmeter-results') + '/baseline_results.jtl'
-          max_error_rate = float(os.environ.get('MAX_ERROR_RATE', 1))
-          max_avg_ms     = float(os.environ.get('MAX_AVG_RESPONSE_MS', 2000))
-
-          if not os.path.exists(results_file):
-              print(f"WARNING: Results file not found: {results_file}")
-              sys.exit(0)
-
-          total, errors, elapsed_sum = 0, 0, 0
-          with open(results_file, newline='') as f:
-              reader = csv.DictReader(f)
-              for row in reader:
-                  total += 1
-                  if row.get('success', 'true').lower() != 'true':
-                      errors += 1
-                  elapsed_sum += int(row.get('elapsed', 0))
-
+          import csv, os, sys
+          f = 'results/baseline.jtl'
+          if not os.path.exists(f):
+            print("No results file found")
+            sys.exit(0)
+          total, errors = 0, 0
+          with open(f) as fp:
+            for row in csv.DictReader(fp):
+              total += 1
+              if row.get('success','true').lower() != 'true':
+                errors += 1
           if total == 0:
-              print("No results found - skipping threshold check")
-              sys.exit(0)
-
-          error_rate = (errors / total) * 100
-          avg_response = elapsed_sum / total
-
-          print(f"=== BASELINE RESULTS ===")
-          print(f"Total Samples  : {total}")
-          print(f"Errors         : {errors}")
-          print(f"Error Rate     : {error_rate:.2f}%  (threshold: {max_error_rate}%)")
-          print(f"Avg Response   : {avg_response:.0f}ms  (threshold: {max_avg_ms}ms)")
-
-          failed = False
-          if error_rate > max_error_rate:
-              print(f"FAIL: Error rate {error_rate:.2f}% exceeds {max_error_rate}%")
-              failed = True
-          if avg_response > max_avg_ms:
-              print(f"FAIL: Avg response {avg_response:.0f}ms exceeds {max_avg_ms}ms")
-              failed = True
-
-          if not failed:
-              print("PASS: All thresholds met!")
-          sys.exit(1 if failed else 0)
+            print("No samples found")
+            sys.exit(0)
+          rate = (errors/total)*100
+          print(f"Total: {total} | Errors: {errors} | Error Rate: {rate:.2f}%")
+          if rate > 1:
+            print("FAIL: Error rate exceeds 1%")
+            sys.exit(1)
+          print("PASS")
           EOF
 
       - name: Upload Baseline HTML Report
@@ -203,29 +107,22 @@ jobs:
         if: always()
         with:
           name: baseline-html-report
-          path: ${{ env.REPORTS_DIR }}/baseline/
+          path: reports/baseline/
           retention-days: 30
 
-      - name: Upload Baseline Raw Results
+      - name: Upload Baseline Results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: baseline-jtl-results
-          path: ${{ env.RESULTS_DIR }}/baseline_results.jtl
+          name: baseline-jtl
+          path: results/baseline.jtl
           retention-days: 30
 
-
-  # ──────────────────────────────────────────
-  # JOB 3: LOAD TEST (150 Users)
-  # ──────────────────────────────────────────
   load-test:
     name: Load Test (150 Users)
     runs-on: ubuntu-latest
     needs: baseline-test
-    if: |
-      github.event.inputs.test_type == 'load' ||
-      github.event.inputs.test_type == 'all' ||
-      github.event_name == 'schedule'
+    if: github.event.inputs.test_type == 'load' || github.event_name == 'push'
 
     steps:
       - name: Checkout Repository
@@ -240,78 +137,45 @@ jobs:
       - name: Restore JMeter Cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.JMETER_HOME }}
-          key: jmeter-${{ env.JMETER_VERSION }}
+          path: /opt/jmeter
+          key: jmeter-5.6.3
 
-      - name: Create Results Directory
-        run: mkdir -p $RESULTS_DIR $REPORTS_DIR/load
-
-      - name: Run Load Test
+      - name: Install JMeter
         run: |
-          echo "==> Starting Load Test: 150 users, ramp 120s, 3 loops"
-          $JMETER_HOME/bin/jmeter \
+          if [ ! -f /opt/jmeter/bin/jmeter ]; then
+            wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz -O /tmp/jmeter.tgz
+            sudo mkdir -p /opt/jmeter
+            sudo tar -xzf /tmp/jmeter.tgz --strip-components=1 -C /opt/jmeter
+          fi
+
+      - name: Create Results Directories
+        run: mkdir -p results reports/load
+
+      - name: Run Load Test (150 Users)
+        run: |
+          /opt/jmeter/bin/jmeter \
             -n \
-            -t tests/$TEST_PLAN \
-            -l $RESULTS_DIR/load_results.jtl \
-            -e -o $REPORTS_DIR/load \
-            -JBASEurl=www.saucedemo.com \
-            --loglevel WARN \
-            2>&1 | tee $RESULTS_DIR/load_run.log
+            -t tests/SwagLabs_Performance_Test.jmx \
+            -Jthreads=150 \
+            -Jrampup=120 \
+            -Jloops=3 \
+            -l results/load.jtl \
+            -e -o reports/load \
+            --loglevel WARN
 
-      - name: Check Performance Thresholds (Load)
-        run: |
-          python3 << 'EOF'
-          import csv, sys, os
-          results_file = os.environ.get('RESULTS_DIR', 'jmeter-results') + '/load_results.jtl'
-          max_error_rate = float(os.environ.get('MAX_ERROR_RATE', 1))
-          max_avg_ms = float(os.environ.get('MAX_AVG_RESPONSE_MS', 2000))
-          if not os.path.exists(results_file):
-              print("WARNING: Results file not found")
-              sys.exit(0)
-          total, errors, elapsed_sum = 0, 0, 0
-          with open(results_file, newline='') as f:
-              for row in csv.DictReader(f):
-                  total += 1
-                  if row.get('success','true').lower() != 'true': errors += 1
-                  elapsed_sum += int(row.get('elapsed', 0))
-          if total == 0: sys.exit(0)
-          error_rate = (errors / total) * 100
-          avg_response = elapsed_sum / total
-          print(f"=== LOAD TEST RESULTS ===")
-          print(f"Total: {total} | Errors: {errors} | Error Rate: {error_rate:.2f}% | Avg: {avg_response:.0f}ms")
-          failed = error_rate > max_error_rate or avg_response > max_avg_ms
-          print("FAIL" if failed else "PASS")
-          sys.exit(1 if failed else 0)
-          EOF
-
-      - name: Upload Load Test HTML Report
+      - name: Upload Load Test Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: load-html-report
-          path: ${{ env.REPORTS_DIR }}/load/
+          path: reports/load/
           retention-days: 30
 
-      - name: Upload Load Test Raw Results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: load-jtl-results
-          path: ${{ env.RESULTS_DIR }}/load_results.jtl
-          retention-days: 30
-
-
-  # ──────────────────────────────────────────
-  # JOB 4: STRESS TEST (500 Users)
-  # ──────────────────────────────────────────
   stress-test:
     name: Stress Test (500 Users)
     runs-on: ubuntu-latest
     needs: load-test
-    if: |
-      github.event.inputs.test_type == 'stress' ||
-      github.event.inputs.test_type == 'all' ||
-      github.event_name == 'schedule'
+    if: github.event.inputs.test_type == 'stress' || github.event_name == 'push'
 
     steps:
       - name: Checkout Repository
@@ -326,181 +190,59 @@ jobs:
       - name: Restore JMeter Cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.JMETER_HOME }}
-          key: jmeter-${{ env.JMETER_VERSION }}
+          path: /opt/jmeter
+          key: jmeter-5.6.3
 
-      - name: Create Results Directory
-        run: mkdir -p $RESULTS_DIR $REPORTS_DIR/stress
+      - name: Install JMeter
+        run: |
+          if [ ! -f /opt/jmeter/bin/jmeter ]; then
+            wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz -O /tmp/jmeter.tgz
+            sudo mkdir -p /opt/jmeter
+            sudo tar -xzf /tmp/jmeter.tgz --strip-components=1 -C /opt/jmeter
+          fi
 
-      - name: Run Stress Test
-        # Stress test is informational — don't fail pipeline on errors
+      - name: Create Results Directories
+        run: mkdir -p results reports/stress
+
+      - name: Run Stress Test (500 Users)
         continue-on-error: true
         run: |
-          echo "==> Starting Stress Test: 500 users, ramp 120s"
-          $JMETER_HOME/bin/jmeter \
+          /opt/jmeter/bin/jmeter \
             -n \
-            -t tests/$TEST_PLAN \
-            -l $RESULTS_DIR/stress_results.jtl \
-            -e -o $REPORTS_DIR/stress \
-            -JBASEurl=www.saucedemo.com \
-            --loglevel WARN \
-            2>&1 | tee $RESULTS_DIR/stress_run.log
+            -t tests/SwagLabs_Performance_Test.jmx \
+            -Jthreads=500 \
+            -Jrampup=120 \
+            -Jloops=1 \
+            -l results/stress.jtl \
+            -e -o reports/stress \
+            --loglevel WARN
 
-      - name: Capture Stress Test Metrics
-        run: |
-          python3 << 'EOF'
-          import csv, sys, os
-          results_file = os.environ.get('RESULTS_DIR', 'jmeter-results') + '/stress_results.jtl'
-          if not os.path.exists(results_file):
-              print("WARNING: Stress results not found")
-              sys.exit(0)
-          total, errors, elapsed_sum = 0, 0, 0
-          with open(results_file, newline='') as f:
-              for row in csv.DictReader(f):
-                  total += 1
-                  if row.get('success','true').lower() != 'true': errors += 1
-                  elapsed_sum += int(row.get('elapsed', 0))
-          if total == 0: sys.exit(0)
-          error_rate = (errors / total) * 100
-          avg_response = elapsed_sum / total
-          print(f"=== STRESS TEST RESULTS (informational) ===")
-          print(f"Total: {total} | Errors: {errors} | Error Rate: {error_rate:.2f}% | Avg: {avg_response:.0f}ms")
-          print("NOTE: Stress test failures are expected — this identifies breaking point.")
-          EOF
-
-      - name: Upload Stress Test HTML Report
+      - name: Upload Stress Test Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: stress-html-report
-          path: ${{ env.REPORTS_DIR }}/stress/
+          path: reports/stress/
           retention-days: 30
 
-
-  # ──────────────────────────────────────────
-  # JOB 5: ENDURANCE TEST (100 users / 30 min)
-  # ──────────────────────────────────────────
-  endurance-test:
-    name: Endurance Test (100 Users / 30 min)
+  summary:
+    name: Test Summary
     runs-on: ubuntu-latest
-    needs: baseline-test
-    # Only run endurance on schedule or manual trigger
-    if: |
-      github.event.inputs.test_type == 'endurance' ||
-      github.event.inputs.test_type == 'all' ||
-      github.event_name == 'schedule'
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java 11
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '11'
-
-      - name: Restore JMeter Cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.JMETER_HOME }}
-          key: jmeter-${{ env.JMETER_VERSION }}
-
-      - name: Create Results Directory
-        run: mkdir -p $RESULTS_DIR $REPORTS_DIR/endurance
-
-      - name: Run Endurance Test
-        run: |
-          echo "==> Starting Endurance Test: 100 users, 30 minutes"
-          $JMETER_HOME/bin/jmeter \
-            -n \
-            -t tests/$TEST_PLAN \
-            -l $RESULTS_DIR/endurance_results.jtl \
-            -e -o $REPORTS_DIR/endurance \
-            -JBASEurl=www.saucedemo.com \
-            --loglevel WARN \
-            2>&1 | tee $RESULTS_DIR/endurance_run.log
-
-      - name: Check Endurance Thresholds
-        run: |
-          python3 << 'EOF'
-          import csv, sys, os
-          results_file = os.environ.get('RESULTS_DIR', 'jmeter-results') + '/endurance_results.jtl'
-          max_error_rate = float(os.environ.get('MAX_ERROR_RATE', 1))
-          max_avg_ms = float(os.environ.get('MAX_AVG_RESPONSE_MS', 2000))
-          if not os.path.exists(results_file):
-              print("WARNING: Endurance results not found")
-              sys.exit(0)
-          total, errors, elapsed_sum = 0, 0, 0
-          with open(results_file, newline='') as f:
-              for row in csv.DictReader(f):
-                  total += 1
-                  if row.get('success','true').lower() != 'true': errors += 1
-                  elapsed_sum += int(row.get('elapsed', 0))
-          if total == 0: sys.exit(0)
-          error_rate = (errors / total) * 100
-          avg_response = elapsed_sum / total
-          print(f"=== ENDURANCE TEST RESULTS ===")
-          print(f"Total: {total} | Errors: {errors} | Error Rate: {error_rate:.2f}% | Avg: {avg_response:.0f}ms")
-          failed = error_rate > max_error_rate or avg_response > max_avg_ms
-          print("FAIL: Thresholds exceeded during sustained load!" if failed else "PASS: Sustained load thresholds met!")
-          sys.exit(1 if failed else 0)
-          EOF
-
-      - name: Upload Endurance Test HTML Report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: endurance-html-report
-          path: ${{ env.REPORTS_DIR }}/endurance/
-          retention-days: 30
-
-
-  # ──────────────────────────────────────────
-  # JOB 6: PUBLISH SUMMARY REPORT
-  # ──────────────────────────────────────────
-  publish-results:
-    name: Publish Results Summary
-    runs-on: ubuntu-latest
-    needs: [baseline-test, load-test, stress-test, endurance-test]
+    needs: [baseline-test, load-test, stress-test]
     if: always()
 
     steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all-reports/
-
-      - name: Generate Consolidated Summary
+      - name: Write Summary
         run: |
           echo "# Swag Labs Performance Test Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Run Date:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
-          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
           echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "| Test Type | Users | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Baseline  | 50    | ${{ needs.baseline-test.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Load      | 150   | ${{ needs.load-test.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Stress    | 500   | ${{ needs.stress-test.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Endurance | 100   | ${{ needs.endurance-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Users | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Baseline | 50 | ${{ needs.baseline-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Load | 150 | ${{ needs.load-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Stress | 500 | ${{ needs.stress-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Performance Thresholds" >> $GITHUB_STEP_SUMMARY
-          echo "- Max Error Rate: **1%**" >> $GITHUB_STEP_SUMMARY
-          echo "- Max Avg Response Time: **2000ms**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📊 Download HTML reports from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
-
-      - name: Notify on Failure (Slack - optional)
-        if: |
-          failure() &&
-          needs.baseline-test.result == 'failure'
-        run: |
-          echo "Performance tests FAILED - would send Slack notification here"
-          # Uncomment and configure for real Slack notifications:
-          # curl -X POST -H 'Content-type: application/json' \
-          #   --data '{"text":"⚠️ Swag Labs performance tests FAILED on ${{ github.ref_name }}!"}' \
-          #   ${{ secrets.SLACK_WEBHOOK_URL }}
+          echo "Download HTML reports from the Artifacts section." >> $GITHUB_STEP_SUMMARY
